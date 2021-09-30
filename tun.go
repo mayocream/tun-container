@@ -2,7 +2,6 @@ package tunhijack
 
 import (
 	"fmt"
-	"io"
 	"log"
 
 	"tailscale.com/net/tstun"
@@ -20,19 +19,21 @@ func Run(config *Config) {
 		tstun.Diagnose(log.Printf, devName)
 		log.Fatalf("TUN device create err: %s", err)
 	}
-	defer dev.Close()
 
 	log.Printf("Create TUN device %s", devName)
 
+	wrap := tstun.Wrap(log.Printf, dev)
+	defer wrap.Close()
+
 	for {
 		buf := make([]byte, 1024)
-		n, err := dev.Read(buf, 4)
-		if err == io.EOF {
-			if n > 0 {
-				data := buf[:n]
-				fmt.Println(string(data))
-			}
-			continue
+		n, err := wrap.Read(buf, 0)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if n > 0 {
+			data := buf[:n]
+			fmt.Println(string(data))
 		}
 	}
 }
