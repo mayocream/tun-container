@@ -20,6 +20,6 @@ func main() {
 }
 
 func socks5Server() error {
-	s, _ := socks5.NewClassicServer(":1234", "127.0.0.1", "", "", 5, 5)
+	s, _ := socks5.NewClassicServer("127.0.0.1:1234", "127.0.0.1", "", "", 5, 5)
 	return s.ListenAndServe(nil)
 }
