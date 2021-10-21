@@ -1,4 +1,4 @@
-package tunhijack
+package tun
 
 import (
 	"log"
