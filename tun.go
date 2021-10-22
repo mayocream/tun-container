@@ -85,29 +85,24 @@ func (t *Tun) HandlePackets() error {
 	return nil
 }
 
-func (t *Tun) Write(buf []byte) (int, error){
+func (t *Tun) Write(buf []byte) (int, error) {
 	return t.dev.Write(buf, tstun.PacketStartOffset)
 }
 
-func (t *Tun) respondToICMP(p *packet.Parsed)  {
+func (t *Tun) respondToICMP(p *packet.Parsed) {
 	if p.IsEchoRequest() {
 		fmt.Println("response to ping")
 		header := p.ICMP4Header()
 		header.ToResponse()
 		outp := packet.Generate(&header, p.Payload())
-		fmt.Println("output: ", outp)
-		fmt.Println("output len: ", len(outp))
-
 
 		buf := make([]byte, 2048)
 		copy(buf[tstun.PacketStartOffset:], outp)
 
-		n, err := t.dev.Write(buf[:tstun.PacketStartOffset+len(outp)], tstun.PacketStartOffset)
-		if err != nil {
+		defer t.dev.Flush()
+		if _, err := t.dev.Write(buf[:tstun.PacketStartOffset+len(outp)], tstun.PacketStartOffset); err != nil {
 			fmt.Println("[E]: write, ", err)
 		}
-		fmt.Println("write len: ", n)
-		t.dev.Flush()
 	}
 }
 
