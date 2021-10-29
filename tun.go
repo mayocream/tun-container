@@ -1,16 +1,30 @@
 package tun
 
 import (
+	"bytes"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/pkg/errors"
 	"github.com/vishvananda/netlink"
 	wtun "golang.zx2c4.com/wireguard/tun"
 	"tailscale.com/net/packet"
 	"tailscale.com/net/tstun"
-	"tailscale.com/wgengine/filter"
+	"tailscale.com/types/ipproto"
 )
+
+// parsedPacketPool holds a pool of Parsed structs for use in filtering.
+// This is needed because escape analysis cannot see that parsed packets
+// do not escape through {Pre,Post}Filter{In,Out}.
+var parsedPacketPool = sync.Pool{New: func() interface{} { return new(packet.Parsed) }}
+
+var bufferPool = sync.Pool{New: func() interface{} {
+	buf := make([]byte, tstun.MaxPacketSize)
+	return bytes.NewBuffer(buf)
+}}
+
+var offset = tstun.PacketStartOffset
 
 // Tun device
 type Tun struct {
@@ -53,64 +67,82 @@ func (t *Tun) Up(addr string) error {
 	return nil
 }
 
-func (t *Tun) Read() ([]byte, error) {
-	buf := make([]byte, 2048)
-	n, err := t.dev.Read(buf, tstun.PacketStartOffset)
-	if err != nil {
-		return nil, err
+// HandlePackets ...
+func (t *Tun) HandlePackets() error {
+	for {
+		buf := bufferPool.Get().(*bytes.Buffer)
+		defer bufferPool.Put(buf)
+
+		n, err := t.dev.Read(buf.Bytes(), offset)
+		if err != nil {
+			log.Printf("[E] read iface fail: %v\n", err)
+			break
+		}
+
+		p := parsedPacketPool.Get().(*packet.Parsed)
+		defer parsedPacketPool.Put(p)
+		p.Decode(buf.Bytes()[offset : offset+n])
+
+		log.Println(p.String())
+		t.respondToICMP(p)
+		t.respondToDNS(p)
 	}
 
-	return buf[tstun.PacketStartOffset : tstun.PacketStartOffset+n], nil
+	return nil
 }
 
 func (t *Tun) Close() {
 	t.dev.Close()
 }
 
-// HandlePackets ...
-func (t *Tun) HandlePackets() error {
-	for {
-		buf, err := t.Read()
-		if err != nil {
-			log.Printf("[E] read iface fail: %v\n", err)
-			break
-		}
-
-		p := new(packet.Parsed)
-		p.Decode(buf)
-		fmt.Println(p.String())
-		t.respondToICMP(p)
-	}
-
-	return nil
-}
-
-func (t *Tun) Write(buf []byte) (int, error) {
-	return t.dev.Write(buf, tstun.PacketStartOffset)
-}
-
 func (t *Tun) respondToICMP(p *packet.Parsed) {
 	if p.IsEchoRequest() {
-		fmt.Println("response to ping")
+		log.Println("response to ping")
 		header := p.ICMP4Header()
 		header.ToResponse()
 		outp := packet.Generate(&header, p.Payload())
 
-		buf := make([]byte, 2048)
-		copy(buf[tstun.PacketStartOffset:], outp)
+		buf := bufferPool.Get().(*bytes.Buffer)
+		defer bufferPool.Put(buf)
+
+		copy(buf.Bytes()[offset:], outp)
 
 		defer t.dev.Flush()
-		if _, err := t.dev.Write(buf[:tstun.PacketStartOffset+len(outp)], tstun.PacketStartOffset); err != nil {
+		if _, err := t.dev.Write(buf.Bytes()[:offset+len(outp)], offset); err != nil {
 			fmt.Println("[E]: write, ", err)
 		}
 	}
 }
 
-// handleLocalPackets inspects packets coming from the local network
-// stack, and intercepts any packets that should be handled by
-// tailscaled directly. Other packets are allowed to proceed into the
-// main ACL filter.
-func handleLocalPackets(p *packet.Parsed, t *tstun.Wrapper) filter.Response {
+func (t *Tun) respondToICMP2(p *packet.Parsed) {
+	if p.IsEchoRequest() {
+		log.Println("response to ping")
 
-	return filter.Accept
+		buf := bufferPool.Get().(*bytes.Buffer)
+		defer bufferPool.Put(buf)
+
+		copy(buf.Bytes()[offset:], p.Buffer())
+
+		defer t.dev.Flush()
+		if _, err := t.dev.Write(buf.Bytes()[:offset+len(p.Buffer())], offset); err != nil {
+			fmt.Println("[E]: write, ", err)
+		}
+	}
+}
+
+func (t *Tun) respondToDNS(p *packet.Parsed) {
+	// DNS query
+	if p.Dst.Port() == 53 && p.IPProto == ipproto.UDP {
+		log.Println("forward dns")
+
+		buf := bufferPool.Get().(*bytes.Buffer)
+		defer bufferPool.Put(buf)
+
+		copy(buf.Bytes()[offset:], p.Buffer())
+
+		defer t.dev.Flush()
+		if _, err := t.dev.Write(buf.Bytes()[:offset+len(p.Buffer())], offset); err != nil {
+			fmt.Println("[E]: write, ", err)
+		}
+	}
 }
